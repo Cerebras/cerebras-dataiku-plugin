@@ -1,0 +1,24 @@
+{
+  "meta": {
+    "label": "Individual Cerebras API key",
+    "description": "Let every DSS user store their own Cerebras key, so Cerebras rate limits and billing attribute per user. Users create a key at https://cloud.cerebras.ai.",
+    "icon": "fas fa-user-lock"
+  },
+
+  "defaultDefinableInline": true,
+  "defaultDefinableAtProjectLevel": true,
+  "pluginParams": [],
+
+  "params": [
+    {
+      "name": "api_key",
+      "label": "Your Cerebras API key",
+      "type": "CREDENTIAL_REQUEST",
+      "credentialRequestSettings": {
+        "type": "SINGLE_FIELD"
+      },
+      "description": "Each user fills this in under Profile and settings > Credentials > Plugins. Not mandatory here: the admin creates the preset empty, and users supply their own key afterwards.",
+      "mandatory": false
+    }
+  ]
+}

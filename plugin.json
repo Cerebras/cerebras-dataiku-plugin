@@ -1,0 +1,14 @@
+{
+    "id": "cerebras",
+    "version": "1.0.0",
+    "meta": {
+        "label": "Cerebras Inference",
+        "description": "Adds Cerebras Inference models (public and dedicated endpoints) to the Dataiku LLM Mesh as a custom LLM connection.",
+        "author": "Cerebras",
+        "icon": "fas fa-bolt",
+        "url": "https://inference-docs.cerebras.ai/",
+        "tags": ["Generative AI", "Agentic"],
+        "licenseInfo": "Apache Software License version 2",
+        "supportLevel": "PARTNER_SUPPORTED"
+    }
+}

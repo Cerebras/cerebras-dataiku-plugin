@@ -1,0 +1,109 @@
+{
+  "meta": {
+    "label": "Cerebras Inference",
+    "description": "Chat completions served on Cerebras wafer-scale hardware. Supports streaming, tool calling, structured outputs, reasoning and image inputs.",
+    "icon": "fas fa-bolt"
+  },
+
+  "params": [
+    {
+      "name": "credential_mode",
+      "label": "Credential mode",
+      "type": "SELECT",
+      "description": "Shared: one admin-managed key for everyone on this connection. Individual: every user supplies their own, so Cerebras billing and rate limits attribute per user.",
+      "selectChoices": [
+        { "value": "SHARED", "label": "Shared key (admin-managed)" },
+        { "value": "PER_USER", "label": "Individual key (per user)" }
+      ],
+      "defaultValue": "SHARED",
+      "mandatory": true
+    },
+    {
+      "name": "shared_key",
+      "label": "Shared Cerebras API key",
+      "type": "PRESET",
+      "parameterSetId": "cerebras-shared-key",
+      "visibilityCondition": "model.credential_mode == 'SHARED'",
+      "mandatory": true
+    },
+    {
+      "name": "user_key",
+      "label": "Individual Cerebras API key",
+      "type": "PRESET",
+      "parameterSetId": "cerebras-user-key",
+      "visibilityCondition": "model.credential_mode == 'PER_USER'",
+      "mandatory": true
+    },
+    {
+      "name": "base_url",
+      "label": "Base URL",
+      "type": "STRING",
+      "defaultValue": "https://api.cerebras.ai/v1",
+      "description": "Change this only for a Cerebras dedicated endpoint. Must include the /v1 suffix.",
+      "mandatory": true
+    },
+    {
+      "name": "model",
+      "label": "Model",
+      "type": "STRING",
+      "defaultValue": "gpt-oss-120b",
+      "description": "Exact model ID, e.g. gpt-oss-120b. Free text rather than a dropdown so it never goes stale as the Cerebras catalog changes. Current catalog: https://inference-docs.cerebras.ai/models/overview",
+      "mandatory": true
+    },
+    {
+      "name": "supports_images",
+      "label": "Force image input support",
+      "type": "BOOLEAN",
+      "defaultValue": false,
+      "description": "Known vision models are detected automatically. Tick this only for a newer or custom vision model the plugin does not recognise. When neither applies, image prompts fail with an explicit error instead of a confusing 400 from the API.",
+      "mandatory": false
+    },
+
+    {
+      "name": "reasoning_effort",
+      "label": "Reasoning effort",
+      "type": "SELECT",
+      "description": "Leave on 'Model default' unless you need to force it. 'None' disables reasoning on models that support that.",
+      "selectChoices": [
+        { "value": "", "label": "Model default" },
+        { "value": "none", "label": "None" },
+        { "value": "low", "label": "Low" },
+        { "value": "medium", "label": "Medium" },
+        { "value": "high", "label": "High" }
+      ],
+      "defaultValue": ""
+    },
+    {
+      "name": "include_reasoning_in_text",
+      "label": "Include reasoning in the answer",
+      "type": "BOOLEAN",
+      "defaultValue": false,
+      "description": "Off (recommended): reasoning tokens are recorded on the trace only. On: they are prefixed to the completion inside <thinking> tags."
+    },
+    {
+      "name": "request_timeout",
+      "label": "Request timeout (s)",
+      "type": "INT",
+      "defaultValue": 300,
+      "minI": 1,
+      "description": "Applies to reading the response as well as connecting."
+    },
+    {
+      "name": "max_retries",
+      "label": "Max retries",
+      "type": "INT",
+      "defaultValue": 3,
+      "minI": 0,
+      "maxI": 10,
+      "description": "Retries on 429 and 5xx with exponential backoff, honouring Retry-After."
+    },
+
+    {
+      "name": "extra_body",
+      "label": "Extra payload fields",
+      "type": "MAP",
+      "description": "Advanced. Merged into the JSON request body, e.g. prompt_cache_key or parallel_tool_calls. Values that look like JSON are parsed; everything else is sent as a string.",
+      "mandatory": false
+    }
+  ]
+}

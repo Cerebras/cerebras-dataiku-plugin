@@ -1,0 +1,21 @@
+{
+  "meta": {
+    "label": "Shared Cerebras API key",
+    "description": "One admin-managed Cerebras key, used by everyone on the connection. Create a key at https://cloud.cerebras.ai.",
+    "icon": "fas fa-key"
+  },
+
+  "defaultDefinableInline": false,
+  "defaultDefinableAtProjectLevel": false,
+  "pluginParams": [],
+
+  "params": [
+    {
+      "name": "api_key",
+      "label": "Shared Cerebras API key",
+      "type": "PASSWORD",
+      "description": "Sent as 'Authorization: Bearer <key>'. Stored encrypted; end users of the connection never see it. Grant preset access only to the intended users or groups, and create separate presets to bill or rate-limit teams independently.",
+      "mandatory": true
+    }
+  ]
+}
