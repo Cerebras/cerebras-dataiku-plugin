@@ -1,0 +1,15 @@
+# Files `git archive` leaves out, so `make plugin` ships only what an installed
+# plugin needs. Development tooling and CI config would otherwise land on every
+# customer's DSS instance -- pyrightconfig.json in particular records local paths.
+#
+# Kept in the zip on purpose: plugin.json, python-lib/, python-llms/,
+# parameter-sets/, README.md, CHANGELOG.md (surfaced by the plugin store) and
+# LICENSE (the grant itself, and Apache-2.0 section 4(a) for the build files).
+
+tests/              export-ignore
+.github/            export-ignore
+Makefile            export-ignore
+pyrightconfig.json  export-ignore
+.gitignore          export-ignore
+.gitattributes      export-ignore
+.mailmap            export-ignore

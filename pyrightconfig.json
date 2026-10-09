@@ -1,0 +1,15 @@
+{
+  // Mirrors the sys.path DSS builds at runtime: plugin python-lib is importable from
+  // component code, and the tests add the component and resource dirs themselves.
+  "include": ["python-lib", "python-llms", "tests"],
+  "extraPaths": ["python-lib", "python-llms/cerebras-chat"],
+
+  // Tests are full of untyped dict/JSON literals, so inference produces dozens of false
+  // positives that bury real findings in shipped code. pytest is the check that matters
+  // for them; they stay in `include` so imports still resolve.
+  "ignore": ["tests"],
+
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.9"
+}

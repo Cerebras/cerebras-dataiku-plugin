@@ -87,7 +87,6 @@ class CerebrasLLM(BaseLLM):
             supports_images=self.supports_images,
             reasoning_effort=self.reasoning_effort,
             extra_body=self.extra_body,
-            fetch_image_as_data_uri=self.client.fetch_image_as_data_uri,
         )
 
     def process(self, query, settings, trace):

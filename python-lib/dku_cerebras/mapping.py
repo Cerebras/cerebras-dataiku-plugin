@@ -9,6 +9,7 @@ Cerebras specifics called out inline.
 
 import json
 import logging
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +27,25 @@ SIMPLE_SETTINGS = {
     "topLogProbs": "top_logprobs",
 }
 
+# Cerebras accepts PNG and JPEG only, and only as base64 data URIs:
+# https://inference-docs.cerebras.ai/capabilities/image-inputs
+SUPPORTED_IMAGE_MIME_TYPES = frozenset(["image/png", "image/jpeg"])
+
+IMAGE_INPUTS_DOC_URL = "https://inference-docs.cerebras.ai/capabilities/image-inputs"
+
 # Base64 prefixes ("magic numbers") used to label inline images with a MIME type.
-# Detecting rather than assuming means an unsupported format is labelled honestly and
-# fails with a clear error, instead of going out as a mislabelled payload.
+# Detecting rather than assuming means an unsupported format is named in the error
+# the user sees, instead of going out as a mislabelled payload and coming back a 400.
+# GIF and WebP are listed precisely because they are *not* supported -- recognising
+# them is what lets the rejection say which format was supplied.
 _BASE64_SIGNATURES = (
     ("iVBORw0KGgo", "image/png"),
     ("/9j/", "image/jpeg"),
     ("R0lGODlh", "image/gif"),
     ("UklGR", "image/webp"),
 )
+
+_DATA_URI_SCHEME = "data:"
 
 STREAM_DONE_SENTINEL = "[DONE]"
 
@@ -43,12 +54,46 @@ class UnsupportedPromptError(ValueError):
     """Raised when a prompt asks for something this model cannot do."""
 
 
-def guess_mime_type(b64_string):
-    """Best-effort MIME type for a base64 payload, defaulting to PNG."""
+def detect_mime_type(b64_string):
+    """MIME type for a base64 payload from its magic number, or None if unrecognised.
+
+    Returns None rather than guessing: an unrecognised payload is rejected, not
+    relabelled as PNG and sent anyway.
+    """
     for signature, mime_type in _BASE64_SIGNATURES:
         if b64_string.startswith(signature):
             return mime_type
-    return "image/png"
+    return None
+
+
+def data_uri_mime_type(url):
+    """The MIME type declared by a `data:<type>;base64,...` URI, lowercased.
+
+    Returns "" when the URI declares none, as in `data:;base64,...`, which is then
+    rejected like any other unsupported format.
+    """
+    header = url[len(_DATA_URI_SCHEME):].split(",", 1)[0]
+    return header.split(";")[0].strip().lower()
+
+
+def _unsupported_format_error(mime_type):
+    return UnsupportedPromptError(
+        "Cerebras accepts PNG and JPEG images only, but this prompt carries {}. "
+        "Convert the image to PNG or JPEG and try again. See {}".format(
+            mime_type or "an unrecognised image format", IMAGE_INPUTS_DOC_URL
+        )
+    )
+
+
+def _safe_url_summary(url):
+    """`scheme://host/...` for an error message, dropping the path and query string.
+
+    Those can carry signed tokens, and this string reaches the DSS logs.
+    """
+    split = urlsplit(url)
+    if split.scheme and split.netloc:
+        return "{}://{}/...".format(split.scheme, split.netloc)
+    return url[:40]
 
 
 def normalize_tool_calls(tool_calls):
@@ -77,7 +122,7 @@ def normalize_tool_calls(tool_calls):
     return normalized
 
 
-def _build_content_parts(message, supports_images, fetch_image_as_data_uri):
+def _build_content_parts(message, supports_images):
     """Turn a Dataiku multimodal `parts` list into an OpenAI `content` array."""
     role = message.get("role")
     content_parts = []
@@ -108,26 +153,35 @@ def _build_content_parts(message, supports_images, fetch_image_as_data_uri):
 
         if part_type == "IMAGE_INLINE":
             inline_image = part.get("inlineImage", "")
-            url = "data:{};base64,{}".format(guess_mime_type(inline_image), inline_image)
+            mime_type = detect_mime_type(inline_image)
+            if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+                raise _unsupported_format_error(mime_type)
+            url = "data:{};base64,{}".format(mime_type, inline_image)
         else:
             source_url = part.get("url") or part.get("uri") or ""
-            if source_url.startswith("data:"):
-                url = source_url
-            elif fetch_image_as_data_uri is None:
+            if not source_url.startswith(_DATA_URI_SCHEME):
+                # The API does not fetch remote images, and neither does this plugin:
+                # downloading a URL chosen by whoever wrote the prompt would make the
+                # DSS backend fetch arbitrary addresses on their behalf, including ones
+                # only it can reach. The image has to arrive in the prompt itself.
                 raise UnsupportedPromptError(
-                    "Cerebras does not accept remote image URLs; images must be inlined as "
-                    "base64 data URIs, and no downloader was provided to inline {}.".format(source_url)
+                    "Cerebras does not accept remote image URLs, and this plugin does not "
+                    "download them. Embed the image in the prompt as a base64 PNG or JPEG "
+                    "data URI instead of linking to {}. See {}".format(
+                        _safe_url_summary(source_url) or "a remote URL", IMAGE_INPUTS_DOC_URL
+                    )
                 )
-            else:
-                # Remote URLs are not accepted, so inline the image instead.
-                url = fetch_image_as_data_uri(source_url)
+            mime_type = data_uri_mime_type(source_url)
+            if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+                raise _unsupported_format_error(mime_type)
+            url = source_url
 
         content_parts.append({"type": "image_url", "image_url": {"url": url}})
 
     return content_parts
 
 
-def build_messages(messages, supports_images=False, fetch_image_as_data_uri=None):
+def build_messages(messages, supports_images=False):
     """Rewrite a Dataiku `query["messages"]` list into Cerebras `messages`."""
     built = []
 
@@ -155,7 +209,7 @@ def build_messages(messages, supports_images=False, fetch_image_as_data_uri=None
         elif "parts" in message:
             built.append({
                 "role": role,
-                "content": _build_content_parts(message, supports_images, fetch_image_as_data_uri),
+                "content": _build_content_parts(message, supports_images),
             })
 
         else:
@@ -284,7 +338,7 @@ def coerce_extra_body(extra_body):
 
 
 def build_payload(model, query, settings, supports_images=False, reasoning_effort=None,
-                  extra_body=None, fetch_image_as_data_uri=None):
+                  extra_body=None):
     """Build the JSON body for POST /v1/chat/completions.
 
     The `stream` field is deliberately absent: CerebrasClient sets it, so it cannot
@@ -294,9 +348,7 @@ def build_payload(model, query, settings, supports_images=False, reasoning_effor
 
     payload = {
         "model": model,
-        "messages": build_messages(
-            query.get("messages"), supports_images, fetch_image_as_data_uri
-        ),
+        "messages": build_messages(query.get("messages"), supports_images),
     }
 
     for dss_key, cerebras_key in SIMPLE_SETTINGS.items():

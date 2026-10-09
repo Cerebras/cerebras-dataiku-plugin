@@ -1,0 +1,9 @@
+# Test-only dependencies, installed by `make unit-tests-ci` into a throwaway venv.
+# Never shipped: the release zip strips tests/ (see Makefile).
+pytest~=8.3
+allure-pytest~=2.13
+
+# The plugin's only third-party import. It ships no code env because `requests` is
+# already in the DSS builtin environment, so nothing has to be declared or built --
+# but a throwaway test venv still has to ask for it explicitly.
+requests~=2.32

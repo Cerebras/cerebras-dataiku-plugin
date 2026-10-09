@@ -5,7 +5,6 @@ so this plugin needs no code environment at all and works unchanged against
 api.cerebras.ai, a dedicated endpoint, or a gateway in front of either.
 """
 
-import base64
 import json
 import logging
 import random
@@ -25,7 +24,6 @@ MODELS_PATH = "/models"
 RETRYABLE_STATUS_CODES = frozenset([408, 409, 429, 500, 502, 503, 504])
 
 _MAX_BACKOFF_SECONDS = 30.0
-_IMAGE_DOWNLOAD_TIMEOUT = 30
 
 
 class CerebrasAPIError(Exception):
@@ -184,16 +182,3 @@ class CerebrasClient(object):
                 request_id=response.headers.get("x-request-id"),
             )
         return [model["id"] for model in (response.json().get("data") or []) if model.get("id")]
-
-    def fetch_image_as_data_uri(self, url):
-        """Download an image and re-encode it as a data URI.
-
-        Remote image URLs are not accepted, so an IMAGE_URL part in a DSS prompt has
-        to be inlined before the request goes out.
-        """
-        logger.info("Inlining image for Cerebras: %s", url)
-        response = self.session.get(url, timeout=_IMAGE_DOWNLOAD_TIMEOUT, stream=True)
-        response.raise_for_status()
-        content_type = (response.headers.get("Content-Type") or "image/png").split(";")[0].strip()
-        encoded = base64.b64encode(response.content).decode("ascii")
-        return "data:{};base64,{}".format(content_type, encoded)
