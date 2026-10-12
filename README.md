@@ -15,7 +15,7 @@ no code changes to your existing projects.
 | **Tool calling** | Multi-turn tool use, including parallel tool calls, in both streaming and non-streaming modes |
 | **Structured outputs** | JSON object and JSON schema response formats |
 | **Reasoning** | Configurable reasoning effort, with reasoning traces captured for inspection |
-| **Vision** | Image prompts on vision-capable models, from both inline images and image URLs |
+| **Vision** | Inline PNG and JPEG prompts on vision-capable models |
 | **Usage reporting** | Prompt and completion token counts surfaced to the LLM Mesh |
 | **Credentials** | One admin-managed key for everyone, or an individual key per user |
 
@@ -86,7 +86,7 @@ API key — one per model, or per team.
 | **Individual Cerebras API key** | — | The per-user preset. Shown in Individual mode |
 | **Base URL** | `https://api.cerebras.ai/v1` | The Cerebras API endpoint |
 | **Model** | `gpt-oss-120b` | The model ID to serve. See [Choosing a model](#choosing-a-model) |
-| **Force image input support** | Off | Enables image prompts for a vision-capable model the plugin does not recognize yet. Well-known vision models are detected automatically |
+| **Force image input support** | Off | Enables image prompts for a vision-capable model the plugin does not recognize yet. Well-known vision models are detected automatically. Does not relax the PNG/JPEG or inline-only rules |
 | **Reasoning effort** | Model default | `none`, `low`, `medium` or `high`. Controls how much the model reasons before answering, on models that support it |
 | **Include reasoning in the answer** | Off | When on, reasoning is returned with the answer inside `<thinking>` tags. When off, it is recorded on the query trace only |
 | **Request timeout (s)** | 300 | Maximum time for a single request |
@@ -173,9 +173,14 @@ A few details that are useful to know when designing prompts and pipelines:
 - **Tool calling and structured outputs are separate modes.** If a request specifies both a
   tool set and a JSON response format, tool calling takes precedence. To get structured data
   from a tool call, define the shape in the tool's own `parameters` schema.
-- **Image URLs are inlined automatically.** Prompts that reference an image by URL have that
-  image fetched and embedded in the request, so both inline images and image URLs work. Images
-  are supported on user messages.
+- **Images must be inlined, and must be PNG or JPEG.** Cerebras accepts images only as
+  base64 data URIs on user messages, and only in those two formats. The plugin will not
+  download an image that a prompt references by URL: fetching a prompt-supplied address
+  would have the Dataiku backend make requests on the prompt author's behalf, including to
+  hosts only the backend can reach. A remote URL, an unsupported format such as GIF or
+  WebP, or an image on a non-user message is rejected before the request goes out, with a
+  message saying what to change. See the
+  [Cerebras image input documentation](https://inference-docs.cerebras.ai/capabilities/image-inputs).
 - **Token usage** is reported for every non-streaming request. For streaming requests, usage
   is reported as sent by the API in the final stream event.
 - **Rate limits and transient errors are retried automatically** with exponential backoff,
@@ -196,6 +201,8 @@ Plugin activity is written to the Dataiku backend log. For more detail, set
 | `Cerebras API returned 404` | Check the model ID against the [model catalog](https://inference-docs.cerebras.ai/models/overview), and that the Base URL ends in `/v1` |
 | `Cerebras API returned 429` | Rate limit reached. Increase **Max retries**, or review your [rate limits](https://inference-docs.cerebras.ai/support/rate-limits) |
 | `Cerebras API returned 400: Model ... does not support image inputs` | The model is not vision-capable. Switch to a vision model such as `qwen-3.8-27b` |
+| `Cerebras does not accept remote image URLs` | The prompt links to an image. Embed it as a base64 PNG or JPEG data URI instead; the plugin will not download it for you |
+| `Cerebras accepts PNG and JPEG images only` | Convert the image. GIF, WebP and everything else are rejected by the API |
 | Image prompts rejected on a vision model | Enable **Force image input support** on the connection |
 | Requests time out on long generations | Increase **Request timeout (s)** |
 

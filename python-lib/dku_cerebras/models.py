@@ -5,7 +5,10 @@ flags -- so vision support has to be known locally. The connection has a checkbo
 force it on for anything newer than this list.
 """
 
-VISION_MODELS = frozenset(["qwen-3.8-27b"])
+# Kept in step with https://inference-docs.cerebras.ai/capabilities/image-inputs.
+# kimi-k2.7-code is customer-trials-only, so most keys cannot reach it; listing it
+# costs nothing and saves the few who can from ticking the override checkbox.
+VISION_MODELS = frozenset(["qwen-3.8-27b", "gemma-4-31b", "kimi-k2.7-code"])
 
 
 def model_label(model_id):

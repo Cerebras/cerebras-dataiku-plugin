@@ -55,7 +55,7 @@
       "label": "Force image input support",
       "type": "BOOLEAN",
       "defaultValue": false,
-      "description": "Known vision models are detected automatically. Tick this only for a newer or custom vision model the plugin does not recognise. When neither applies, image prompts fail with an explicit error instead of a confusing 400 from the API.",
+      "description": "Known vision models are detected automatically. Tick this only for a newer or custom vision model the plugin does not recognise. When neither applies, image prompts fail with an explicit error instead of a confusing 400 from the API. Images must be inlined as base64 PNG or JPEG either way: Cerebras does not accept remote image URLs, and the plugin does not download them.",
       "mandatory": false
     },
 
