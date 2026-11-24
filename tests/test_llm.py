@@ -8,6 +8,7 @@ are the ones llm.py reads, and that process()/process_stream() honour them.
 import json
 import os
 import sys
+import time
 import types
 
 import pytest
@@ -43,6 +44,21 @@ from llm import CerebrasLLM  # noqa: E402
 class FakeSpan(object):
     def __init__(self):
         self.attributes = {}
+        self.start = self.finish = None
+
+    def __enter__(self):
+        self.begin(int(time.time() * 1000))
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.end(int(time.time() * 1000))
+
+    def begin(self, timestamp):
+        self.start = timestamp
+
+    def end(self, timestamp):
+        assert self.start is not None and self.finish is None
+        self.finish = timestamp
 
 
 class FakeTrace(object):
@@ -201,17 +217,9 @@ class TestProcess:
         result = llm.process({"messages": [{"role": "user", "content": "?"}]}, {}, trace)
 
         assert result["text"] == "42"
+        assert trace.spans[0][1].finish is not None
+        assert trace.spans[0][0] == "Cerebras chat completion"
         assert trace.spans[0][1].attributes["reasoning"] == "deep thought"
-
-    def test_broken_tracing_does_not_break_completions(self, monkeypatch):
-        class ExplodingTrace(object):
-            def subspan(self, name):
-                raise RuntimeError("tracing API changed")
-
-        llm, _ = _llm(monkeypatch, response=self.RESPONSE)
-        result = llm.process({"messages": [{"role": "user", "content": "ping"}]}, {},
-                             ExplodingTrace())
-        assert result["text"] == "pong"
 
 
 class TestProcessStream:
@@ -237,7 +245,14 @@ class TestProcessStream:
     def test_footer_is_recorded_on_the_trace(self, monkeypatch):
         llm, _ = _llm(monkeypatch, stream_lines=self.LINES)
         trace = FakeTrace()
-        list(llm.process_stream({"messages": [{"role": "user", "content": "ping"}]}, {}, trace))
+        stream = llm.process_stream({"messages": []}, {}, trace)
+        assert next(stream) == {"text": "po"}
+        name, span = trace.spans[0]
+        assert name == "Cerebras chat completion (streaming)"
+        assert span.start is not None and span.finish is None
+        assert next(stream) == {"text": "ng"}
+        assert "footer" in next(stream)
+        assert span.finish is not None
         assert trace.spans[0][1].attributes["completionTokens"] == 2
 
     def test_the_response_is_closed_even_if_the_consumer_stops_early(self, monkeypatch):
@@ -253,11 +268,32 @@ class TestProcessStream:
 
         monkeypatch.setattr(llm.client, "stream_chat_completion", fake_stream_chat_completion)
 
+        trace = FakeTrace()
         generator = llm.process_stream({"messages": [{"role": "user", "content": "ping"}]},
-                                       {}, FakeTrace())
+                                       {}, trace)
         next(generator)
         generator.close()
         assert responses[0].closed is True
+        assert trace.spans[0][1].finish is not None
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_provider_failure_closes_span(monkeypatch, streaming):
+    llm = CerebrasLLM()
+    llm.set_config(_config(), {})
+    trace = FakeTrace()
+
+    def fail(payload):
+        raise RuntimeError("provider failed")
+
+    method = "stream_chat_completion" if streaming else "chat_completion"
+    monkeypatch.setattr(llm.client, method, fail)
+    with pytest.raises(RuntimeError, match="provider failed"):
+        if streaming:
+            next(llm.process_stream({"messages": []}, {}, trace))
+        else:
+            llm.process({"messages": []}, {}, trace)
+    assert trace.spans[0][1].finish is not None
 
 
 class TestToolRoundTrip:

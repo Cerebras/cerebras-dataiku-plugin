@@ -5,6 +5,7 @@ with the values from llm.json, then process() / process_stream() per completion.
 """
 
 import logging
+import time
 
 # Provided by DSS at runtime and not installable from PyPI -- never add it to a
 # requirements file.
@@ -92,58 +93,61 @@ class CerebrasLLM(BaseLLM):
     def process(self, query, settings, trace):
         payload = self._build_payload(query, settings)
 
-        span = None
-        try:
-            span = trace.subspan("Cerebras chat completion")
-        except Exception:
-            logger.debug("Tracing unavailable", exc_info=True)
-        _set_trace_attributes(span, {
-            "model": self.model,
-            "messageCount": len(payload.get("messages", [])),
-            "stream": False,
-        })
+        with trace.subspan("Cerebras chat completion") as span:
+            _set_trace_attributes(span, {
+                "model": self.model,
+                "messageCount": len(payload.get("messages", [])),
+                "stream": False,
+            })
 
-        response_data = self.client.chat_completion(payload)
-        result = parse_completion(
-            response_data,
-            include_reasoning_in_text=self.include_reasoning_in_text,
-        )
+            response_data = self.client.chat_completion(payload)
+            result = parse_completion(
+                response_data,
+                include_reasoning_in_text=self.include_reasoning_in_text,
+            )
 
-        # `_reasoning` is not part of the DSS response contract: surface it on the
-        # trace for debugging, then drop it before returning.
-        reasoning = result.pop("_reasoning", None)
-        _set_trace_attributes(span, {
-            "finishReason": result.get("finishReason"),
-            "promptTokens": result.get("promptTokens"),
-            "completionTokens": result.get("completionTokens"),
-            "cerebrasTimeInfo": response_data.get("time_info"),
-            "reasoning": reasoning or None,
-        })
+            # `_reasoning` is not part of the DSS response contract: surface it on the
+            # trace for debugging, then drop it before returning.
+            reasoning = result.pop("_reasoning", None)
+            _set_trace_attributes(span, {
+                "finishReason": result.get("finishReason"),
+                "promptTokens": result.get("promptTokens"),
+                "completionTokens": result.get("completionTokens"),
+                "cerebrasTimeInfo": response_data.get("time_info"),
+                "reasoning": reasoning or None,
+            })
 
-        return result
+            return result
 
     def process_stream(self, query, settings, trace):
         payload = self._build_payload(query, settings)
 
-        span = None
+        span = trace.subspan("Cerebras chat completion (streaming)")
+        span.begin(int(time.time() * 1000))
         try:
-            span = trace.subspan("Cerebras chat completion (streaming)")
-        except Exception:
-            logger.debug("Tracing unavailable", exc_info=True)
-        _set_trace_attributes(span, {
-            "model": self.model,
-            "messageCount": len(payload.get("messages", [])),
-            "stream": True,
-        })
+            _set_trace_attributes(span, {
+                "model": self.model,
+                "messageCount": len(payload.get("messages", [])),
+                "stream": True,
+            })
 
-        response = self.client.stream_chat_completion(payload)
-        try:
-            for chunk in stream_to_dataiku_chunks(
-                response.iter_lines(),
-                include_reasoning_in_text=self.include_reasoning_in_text,
-            ):
-                if "footer" in chunk:
-                    _set_trace_attributes(span, chunk["footer"])
-                yield chunk
+            response = self.client.stream_chat_completion(payload)
+            try:
+                footer = None
+                for chunk in stream_to_dataiku_chunks(
+                    response.iter_lines(),
+                    include_reasoning_in_text=self.include_reasoning_in_text,
+                ):
+                    if "footer" in chunk:
+                        _set_trace_attributes(span, chunk["footer"])
+                        footer = chunk
+                        break
+                    yield chunk
+            finally:
+                response.close()
         finally:
-            response.close()
+            span.end(int(time.time() * 1000))
+
+        # DSS serializes the trace as soon as it receives the footer.
+        if footer is not None:
+            yield footer
