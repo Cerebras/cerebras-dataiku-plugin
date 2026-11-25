@@ -134,7 +134,7 @@ def _build_content_parts(message, supports_images):
             content_parts.append({"type": "text", "text": part.get("text", "")})
             continue
 
-        if part_type not in ("IMAGE_INLINE", "IMAGE_URL", "IMAGE_URI"):
+        if part_type not in ("IMAGE_INLINE", "IMAGE_URI"):
             logger.warning("Ignoring unsupported prompt part of type %s", part_type)
             continue
 
@@ -158,7 +158,7 @@ def _build_content_parts(message, supports_images):
                 raise _unsupported_format_error(mime_type)
             url = "data:{};base64,{}".format(mime_type, inline_image)
         else:
-            source_url = part.get("url") or part.get("uri") or ""
+            source_url = part.get("imageUrl") or ""
             if not source_url.startswith(_DATA_URI_SCHEME):
                 # The API does not fetch remote images, and neither does this plugin:
                 # downloading a URL chosen by whoever wrote the prompt would make the

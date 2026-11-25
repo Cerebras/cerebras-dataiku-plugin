@@ -81,7 +81,7 @@ class TestBuildMessages:
     def test_a_jpeg_data_uri_is_passed_through_unchanged(self):
         source = "data:image/jpeg;base64,/9j/4AAQ"
         messages = build_messages(
-            [{"role": "user", "parts": [{"type": "IMAGE_URL", "url": source}]}],
+            [{"role": "user", "parts": [{"type": "IMAGE_URI", "imageUrl": source}]}],
             supports_images=True,
         )
         assert messages[0]["content"][0]["image_url"]["url"] == source
@@ -91,7 +91,7 @@ class TestBuildMessages:
         with pytest.raises(UnsupportedPromptError, match="does not accept remote image URLs"):
             build_messages(
                 [{"role": "user", "parts": [
-                    {"type": "IMAGE_URL", "url": "https://x.example/y.png"},
+                    {"type": "IMAGE_URI", "imageUrl": "https://x.example/y.png"},
                 ]}],
                 supports_images=True,
             )
@@ -100,7 +100,7 @@ class TestBuildMessages:
         with pytest.raises(UnsupportedPromptError) as raised:
             build_messages(
                 [{"role": "user", "parts": [
-                    {"type": "IMAGE_URL", "url": "https://x.example/secret.png?sig=shhh"},
+                    {"type": "IMAGE_URI", "imageUrl": "https://x.example/secret.png?sig=shhh"},
                 ]}],
                 supports_images=True,
             )
@@ -117,7 +117,7 @@ class TestBuildMessages:
     def test_every_non_data_scheme_is_rejected(self, url):
         with pytest.raises(UnsupportedPromptError, match="does not accept remote image URLs"):
             build_messages(
-                [{"role": "user", "parts": [{"type": "IMAGE_URI", "uri": url}]}],
+                [{"role": "user", "parts": [{"type": "IMAGE_URI", "imageUrl": url}]}],
                 supports_images=True,
             )
 
@@ -151,7 +151,7 @@ class TestBuildMessages:
     def test_a_data_uri_declaring_an_unsupported_type_is_rejected(self, source):
         with pytest.raises(UnsupportedPromptError, match="PNG and JPEG"):
             build_messages(
-                [{"role": "user", "parts": [{"type": "IMAGE_URL", "url": source}]}],
+                [{"role": "user", "parts": [{"type": "IMAGE_URI", "imageUrl": source}]}],
                 supports_images=True,
             )
 
