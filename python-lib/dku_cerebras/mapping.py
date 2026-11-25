@@ -230,7 +230,7 @@ def _build_tool_choice(tool_choice):
     choice_type = (tool_choice.get("type") or "").lower()
     if choice_type in ("auto", "none", "required"):
         return choice_type
-    if choice_type in ("function", "tool"):
+    if choice_type in ("tool_name", "function", "tool"):
         name = tool_choice.get("name") or (tool_choice.get("function") or {}).get("name")
         if name:
             return {"type": "function", "function": {"name": name}}

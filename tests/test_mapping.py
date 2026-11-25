@@ -198,13 +198,17 @@ class TestBuildPayload:
         payload = build_payload("gpt-oss-120b", self.QUERY, {"temperature": 0})
         assert payload["temperature"] == 0
 
-    def test_tool_choice_variants(self):
-        tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
-        assert build_payload("m", self.QUERY, {"tools": tools, "toolChoice": {"type": "AUTO"}})[
-            "tool_choice"] == "auto"
-        assert build_payload("m", self.QUERY, {
-            "tools": tools, "toolChoice": {"type": "FUNCTION", "name": "f"}
-        })["tool_choice"] == {"type": "function", "function": {"name": "f"}}
+    @pytest.mark.parametrize("choice,expected", [
+        ({"type": "auto"}, "auto"),
+        ({"type": "none"}, "none"),
+        ({"type": "required"}, "required"),
+        ({"type": "tool_name", "name": "multiply"},
+         {"type": "function", "function": {"name": "multiply"}}),
+    ], ids=["auto", "none", "required", "named-tool"])
+    def test_tool_choice_variants(self, choice, expected):
+        tools = [{"type": "function", "function": {"name": "multiply", "parameters": {}}}]
+        payload = build_payload("m", self.QUERY, {"tools": tools, "toolChoice": choice})
+        assert payload["tool_choice"] == expected
 
     def test_json_schema_response_format(self):
         schema = {"type": "object", "properties": {"a": {"type": "string"}},
