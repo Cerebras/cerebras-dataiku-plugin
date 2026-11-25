@@ -200,10 +200,15 @@ def build_messages(messages, supports_images=False):
             # DSS batches every tool result into one message; the API wants one per call.
             for tool_output in message["toolOutputs"]:
                 output = tool_output.get("output", "")
+                output_text = output if isinstance(output, str) else json.dumps(output)
+                text_parts = [output_text] if output_text else []
+                for part in tool_output.get("parts") or []:
+                    if part.get("type") == "TEXT" and part.get("text"):
+                        text_parts.append(part["text"])
                 built.append({
                     "role": "tool",
                     "tool_call_id": tool_output.get("callId") or tool_output.get("id"),
-                    "content": output if isinstance(output, str) else json.dumps(output),
+                    "content": "\n".join(text_parts),
                 })
 
         elif "parts" in message:

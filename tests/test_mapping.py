@@ -66,6 +66,24 @@ class TestBuildMessages:
         assert messages[0]["content"] == "21C"
         assert messages[1]["content"] == '{"aqi": 30}'
 
+    @pytest.mark.parametrize("output,expected", [
+        ("", "Status: paid.\nBalance: 0."),
+        ("Invoice found.", "Invoice found.\nStatus: paid.\nBalance: 0."),
+    ], ids=["parts-only", "output-and-parts"])
+    def test_multipart_tool_output_preserves_text(self, output, expected):
+        messages = build_messages([{
+            "role": "tool",
+            "toolOutputs": [{
+                "callId": "call_123",
+                "output": output,
+                "parts": [
+                    {"type": "TEXT", "text": "Status: paid."},
+                    {"type": "TEXT", "text": "Balance: 0."},
+                ],
+            }],
+        }])
+        assert messages == [{"role": "tool", "tool_call_id": "call_123", "content": expected}]
+
     def test_inline_image_becomes_a_data_uri(self):
         messages = build_messages(
             [{"role": "user", "parts": [
