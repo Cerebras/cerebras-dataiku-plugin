@@ -201,6 +201,7 @@ class TestProcess:
         assert result["completionTokens"] == 2
         assert result["finishReason"] == "stop"
         assert "artifacts" not in result
+        assert "logProbs" not in result
         # `_reasoning` is internal and must not leak into the DSS response.
         assert "_reasoning" not in result
 
@@ -210,6 +211,29 @@ class TestProcess:
         assert sent["payload"]["model"] == "gpt-oss-120b"
         assert "stream" not in sent["payload"]
         assert sent["payload"]["temperature"] == 0.1
+
+    def test_returns_token_log_probs_and_alternatives(self, monkeypatch):
+        choice = {
+            "message": {"content": "Yes!"},
+            "logprobs": {"content": [
+                {"token": "Yes", "logprob": -0.2, "bytes": [89, 101, 115], "top_logprobs": [
+                    {"token": "Yes", "logprob": -0.2}, {"token": "No", "logprob": -1.8},
+                ]},
+                {"token": "!", "logprob": 0.0, "top_logprobs": []},
+            ]},
+        }
+        llm, sent = _llm(monkeypatch, response={"choices": [choice]})
+        result = llm.process({"messages": []}, {"logProbs": True, "topLogProbs": 2}, FakeTrace())
+
+        assert sent["payload"]["logprobs"] is True
+        assert sent["payload"]["top_logprobs"] == 2
+        assert result["text"] == "Yes!"
+        assert result["logProbs"] == [
+            {"token": "Yes", "logProb": -0.2, "topLogProbs": [
+                {"token": "Yes", "logProb": -0.2}, {"token": "No", "logProb": -1.8},
+            ]},
+            {"token": "!", "logProb": 0.0, "topLogProbs": []},
+        ]
 
     def test_connection_settings_reach_the_payload(self, monkeypatch):
         llm, sent = _llm(monkeypatch, response=self.RESPONSE, reasoning_effort="high",
@@ -278,6 +302,28 @@ class TestProcessStream:
         ]
         assert "".join(c["text"] for c in chunks if "text" in c) == expected_text
         assert chunks[-1]["footer"]["finishReason"] == "stop"
+
+    def test_streams_log_probs_on_each_content_chunk(self, monkeypatch):
+        choices = [
+            {"delta": {"content": "Yes"}, "logprobs": {"content": [
+                {"token": "Yes", "logprob": -0.2, "top_logprobs": [{"token": "Yes", "logprob": -0.2}]}
+            ]}},
+            {"delta": {"content": "!"}, "logprobs": None},
+            {"delta": {}, "logprobs": {"content": [{"token": "!", "logprob": 0.0}]}},
+            {"delta": {}, "logprobs": {"content": None}, "finish_reason": "stop"},
+        ]
+        lines = ["data: " + json.dumps({"choices": [choice]}) for choice in choices]
+        llm, _ = _llm(monkeypatch, stream_lines=lines + ["data: [DONE]"])
+        stream = llm.process_stream({"messages": []}, {"logProbs": True}, FakeTrace())
+
+        assert list(stream) == [
+            {"text": "Yes", "logProbs": [
+                {"token": "Yes", "logProb": -0.2, "topLogProbs": [{"token": "Yes", "logProb": -0.2}]}
+            ]},
+            {"text": "!"},
+            {"text": "", "logProbs": [{"token": "!", "logProb": 0.0, "topLogProbs": []}]},
+            {"footer": {"promptTokens": 0, "completionTokens": 0, "finishReason": "stop"}},
+        ]
 
     def test_footer_is_recorded_on_the_trace(self, monkeypatch):
         llm, _ = _llm(monkeypatch, stream_lines=self.LINES)

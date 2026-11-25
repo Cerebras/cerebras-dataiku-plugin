@@ -397,6 +397,24 @@ def _usage_to_dataiku(usage):
     return {"promptTokens": prompt_tokens, "completionTokens": completion_tokens}
 
 
+def _log_probs_to_dataiku(logprobs):
+    """Map the output token scores and alternatives on a Cerebras choice."""
+    tokens = (logprobs or {}).get("content")
+    if tokens is None:
+        return {}
+    return {"logProbs": [
+        {
+            "token": token["token"],
+            "logProb": token["logprob"],
+            "topLogProbs": [
+                {"token": candidate["token"], "logProb": candidate["logprob"]}
+                for candidate in (token.get("top_logprobs") or [])
+            ],
+        }
+        for token in tokens
+    ]}
+
+
 def _wrap_reasoning(reasoning):
     return "<thinking>\n{}\n</thinking>\n\n".format(reasoning.strip())
 
@@ -436,6 +454,7 @@ def parse_completion(response_data, include_reasoning_in_text=False):
                 text = _wrap_reasoning(reasoning) + text
         result["text"] = text
         result["_reasoning"] = reasoning
+        result.update(_log_probs_to_dataiku(choice.get("logprobs")))
 
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
@@ -529,11 +548,13 @@ def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
                     yield {"text": reasoning}
 
             content = delta.get("content")
-            if content:
-                if reasoning_open:
-                    yield {"text": "\n</thinking>\n\n"}
-                    reasoning_open = False
-                yield {"text": content}
+            if content and reasoning_open:
+                yield {"text": "\n</thinking>\n\n"}
+                reasoning_open = False
+            content_chunk = _log_probs_to_dataiku(choice.get("logprobs"))
+            if content or content_chunk:
+                content_chunk["text"] = content or ""
+                yield content_chunk
 
             if delta.get("tool_calls"):
                 _merge_tool_call_deltas(tool_calls, delta["tool_calls"])
