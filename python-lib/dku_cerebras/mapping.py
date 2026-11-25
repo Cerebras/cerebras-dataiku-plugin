@@ -10,6 +10,7 @@ Cerebras specifics called out inline.
 import json
 import logging
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -400,11 +401,19 @@ def _wrap_reasoning(reasoning):
     return "<thinking>\n{}\n</thinking>\n\n".format(reasoning.strip())
 
 
+def _reasoning_artifact(artifact_id, text):
+    return {
+        "id": artifact_id or uuid4().hex,
+        "type": "REASONING",
+        "parts": [{"type": "TEXT", "index": 0, "text": text}],
+    }
+
+
 def parse_completion(response_data, include_reasoning_in_text=False):
     """Turn a Cerebras chat completion into a Dataiku CompletionResponse.
 
-    Returns the text, token counts, tool calls and finish reason, plus a
-    non-contractual `_reasoning` key the caller can push onto the trace.
+    Returns text, token counts, tool calls, finish reason and any reasoning artifact.
+    The caller also uses the private `_reasoning` field to populate the trace.
     """
     result = {
         "text": "",
@@ -421,8 +430,10 @@ def parse_completion(response_data, include_reasoning_in_text=False):
 
         reasoning = message.get("reasoning") or ""
         text = message.get("content") or ""
-        if reasoning and include_reasoning_in_text:
-            text = _wrap_reasoning(reasoning) + text
+        if reasoning:
+            result["artifacts"] = [_reasoning_artifact(response_data.get("id"), reasoning)]
+            if include_reasoning_in_text:
+                text = _wrap_reasoning(reasoning) + text
         result["text"] = text
         result["_reasoning"] = reasoning
 
@@ -475,7 +486,7 @@ def _merge_tool_call_deltas(accumulator, deltas):
 def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
     """Convert an SSE line iterator into the chunk dicts DSS expects.
 
-    Yields `{"text": ...}` as content arrives, then one `{"toolCalls": [...]}` once
+    Yields text and reasoning artifact deltas, then one `{"toolCalls": [...]}` once
     every call is fully assembled, then a final `{"footer": {...}}` carrying the
     token counts and finish reason.
     """
@@ -483,6 +494,7 @@ def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
     usage = None
     finish_reason = None
     reasoning_open = False
+    reasoning_id = None
 
     for raw_line in lines:
         line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
@@ -491,6 +503,7 @@ def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
             continue
         if chunk.get("_done"):
             break
+        reasoning_id = reasoning_id or chunk.get("id")
 
         # Usage arrives on the terminal chunk, which may carry no choices.
         if chunk.get("usage"):
@@ -505,11 +518,15 @@ def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
             delta = choice.get("delta") or {}
 
             reasoning = delta.get("reasoning")
-            if reasoning and include_reasoning_in_text:
-                if not reasoning_open:
-                    yield {"text": "<thinking>\n"}
-                    reasoning_open = True
-                yield {"text": reasoning}
+            if reasoning:
+                artifact = _reasoning_artifact(reasoning_id, reasoning)
+                reasoning_id = artifact["id"]
+                yield {"type": "content", "artifacts": [artifact]}
+                if include_reasoning_in_text:
+                    if not reasoning_open:
+                        yield {"text": "<thinking>\n"}
+                        reasoning_open = True
+                    yield {"text": reasoning}
 
             content = delta.get("content")
             if content:

@@ -353,7 +353,7 @@ class TestParseCompletion:
         assert result["toolCalls"][0]["id"] == "c1"
         assert result["text"] == ""
 
-    def test_reasoning_is_hidden_by_default(self):
+    def test_reasoning_is_excluded_from_answer_text_by_default(self):
         response = {"choices": [{"message": {"content": "42", "reasoning": "thinking hard"}}]}
         assert parse_completion(response)["text"] == "42"
         assert parse_completion(response)["_reasoning"] == "thinking hard"
@@ -431,14 +431,17 @@ class TestStreaming:
             lines, include_reasoning_in_text=True) if "text" in c)
         assert text == "<thinking>\nstep 1\n</thinking>\n\nanswer"
 
-    def test_reasoning_deltas_are_dropped_by_default(self):
+    def test_reasoning_deltas_share_an_artifact_id_when_the_stream_omits_it(self):
         lines = [
             _sse({"choices": [{"delta": {"reasoning": "step 1"}}]}),
+            _sse({"choices": [{"delta": {"reasoning": " and step 2"}}]}),
             _sse({"choices": [{"delta": {"content": "answer"}}]}),
             "data: [DONE]",
         ]
-        text = "".join(c["text"] for c in stream_to_dataiku_chunks(lines) if "text" in c)
-        assert text == "answer"
+        chunks = list(stream_to_dataiku_chunks(lines))
+        first, second = [c["artifacts"][0] for c in chunks if "artifacts" in c]
+        assert first["id"] and second["id"] == first["id"]
+        assert "".join(c["text"] for c in chunks if "text" in c) == "answer"
 
     def test_keepalives_and_garbage_are_ignored(self):
         lines = ["", ": keep-alive", "data: ", "data: not-json",

@@ -14,7 +14,7 @@ no code changes to your existing projects.
 | **Streaming** | Token-by-token responses in Prompt Studios and Answers |
 | **Tool calling** | Multi-turn tool use, including parallel tool calls, in both streaming and non-streaming modes |
 | **Structured outputs** | JSON object and JSON schema response formats |
-| **Reasoning** | Configurable reasoning effort, with reasoning traces captured for inspection |
+| **Reasoning** | Configurable reasoning effort, with model reasoning returned as a separate `REASONING` artifact |
 | **Vision** | Inline PNG and JPEG prompts on vision-capable models |
 | **Usage reporting** | Prompt and completion token counts surfaced to the LLM Mesh |
 | **Credentials** | One admin-managed key for everyone, or an individual key per user |
@@ -88,7 +88,7 @@ API key — one per model, or per team.
 | **Model** | `gpt-oss-120b` | The model ID to serve. See [Choosing a model](#choosing-a-model) |
 | **Force image input support** | Off | Enables image prompts for a vision-capable model the plugin does not recognize yet. Well-known vision models are detected automatically. Does not relax the PNG/JPEG or inline-only rules |
 | **Reasoning effort** | Model default | `none`, `low`, `medium` or `high`. Controls how much the model reasons before answering, on models that support it |
-| **Include reasoning in the answer** | Off | When on, reasoning is returned with the answer inside `<thinking>` tags. When off, it is recorded on the query trace only |
+| **Include reasoning in the answer** | Off | When enabled, also prefixes the answer text with the model's reasoning inside `<thinking>` tags |
 | **Request timeout (s)** | 300 | Maximum time for a single request |
 | **Max retries** | 3 | Automatic retries for rate limits and transient errors, using exponential backoff |
 | **Extra payload fields** | — | Additional Cerebras API parameters to send with every request, such as `prompt_cache_key` or `parallel_tool_calls` |
@@ -185,8 +185,9 @@ A few details that are useful to know when designing prompts and pipelines:
   is reported as sent by the API in the final stream event.
 - **Rate limits and transient errors are retried automatically** with exponential backoff,
   honoring the `Retry-After` header. Tune this with **Max retries**.
-- **Reasoning traces** are recorded on the Dataiku query trace, so they are available for
-  inspection without appearing in the answer your users see.
+- When Cerebras returns **reasoning**, the plugin sends it to DSS as a separate
+  `REASONING` artifact. During streaming, the plugin forwards each reasoning update
+  as it arrives. Blocking completions also record the reasoning on the Dataiku query trace.
 
 ## Troubleshooting
 

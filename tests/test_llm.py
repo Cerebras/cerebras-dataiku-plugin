@@ -123,6 +123,14 @@ def _llm(monkeypatch, response=None, stream_lines=None, **config_overrides):
     return llm, sent
 
 
+def _expected_reasoning(text):
+    return {
+        "id": "chatcmpl-1",
+        "type": "REASONING",
+        "parts": [{"type": "TEXT", "index": 0, "text": text}],
+    }
+
+
 class TestSetConfig:
     def test_reads_the_credential_from_the_preset_and_the_url_from_the_connection(self):
         llm = CerebrasLLM()
@@ -192,6 +200,7 @@ class TestProcess:
         assert result["promptTokens"] == 10
         assert result["completionTokens"] == 2
         assert result["finishReason"] == "stop"
+        assert "artifacts" not in result
         # `_reasoning` is internal and must not leak into the DSS response.
         assert "_reasoning" not in result
 
@@ -210,13 +219,20 @@ class TestProcess:
         # Anything without a dedicated field still reaches the API via extra payload fields.
         assert sent["payload"]["prompt_cache_key"] == "team-a"
 
-    def test_reasoning_lands_on_the_trace_not_the_answer(self, monkeypatch):
-        response = {"choices": [{"message": {"content": "42", "reasoning": "deep thought"}}]}
-        llm, _ = _llm(monkeypatch, response=response)
+    @pytest.mark.parametrize("inline, expected_text", [
+        (False, "42"),
+        (True, "<thinking>\ndeep thought\n</thinking>\n\n42"),
+    ])
+    def test_returns_reasoning_artifact_and_records_trace(self, monkeypatch, inline, expected_text):
+        response = {"id": "chatcmpl-1",
+                    "choices": [{"message": {"content": "42", "reasoning": "deep thought"}}]}
+        llm, _ = _llm(monkeypatch, response=response, include_reasoning_in_text=inline)
         trace = FakeTrace()
         result = llm.process({"messages": [{"role": "user", "content": "?"}]}, {}, trace)
 
-        assert result["text"] == "42"
+        assert result["text"] == expected_text
+        assert result["artifacts"] == [_expected_reasoning("deep thought")]
+        assert "_reasoning" not in result
         assert trace.spans[0][1].finish is not None
         assert trace.spans[0][0] == "Cerebras chat completion"
         assert trace.spans[0][1].attributes["reasoning"] == "deep thought"
@@ -237,10 +253,31 @@ class TestProcessStream:
                                          {}, FakeTrace()))
 
         assert "".join(c["text"] for c in chunks if "text" in c) == "pong"
+        assert all("artifacts" not in chunk for chunk in chunks)
         footer = chunks[-1]["footer"]
         assert footer["promptTokens"] == 4
         assert footer["finishReason"] == "stop"
         assert sent["method"] == "stream_chat_completion"
+
+    @pytest.mark.parametrize("inline, expected_text", [
+        (False, "42"),
+        (True, "<thinking>\ndeep thought\n</thinking>\n\n42"),
+    ])
+    def test_streams_reasoning_artifact_deltas(self, monkeypatch, inline, expected_text):
+        lines = [
+            'data: {"id":"chatcmpl-1","choices":[{"delta":{"reasoning":"deep"}}]}',
+            'data: {"id":"chatcmpl-1","choices":[{"delta":{"reasoning":" thought","content":"42"}}]}',
+            "data: [DONE]",
+        ]
+        llm, _ = _llm(monkeypatch, stream_lines=lines, include_reasoning_in_text=inline)
+        chunks = list(llm.process_stream({"messages": []}, {}, FakeTrace()))
+
+        assert [chunk for chunk in chunks if "artifacts" in chunk] == [
+            {"type": "content", "artifacts": [_expected_reasoning("deep")]},
+            {"type": "content", "artifacts": [_expected_reasoning(" thought")]},
+        ]
+        assert "".join(c["text"] for c in chunks if "text" in c) == expected_text
+        assert chunks[-1]["footer"]["finishReason"] == "stop"
 
     def test_footer_is_recorded_on_the_trace(self, monkeypatch):
         llm, _ = _llm(monkeypatch, stream_lines=self.LINES)
