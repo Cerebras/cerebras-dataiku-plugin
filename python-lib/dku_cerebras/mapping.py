@@ -12,6 +12,8 @@ import logging
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .models import TOOL_IMAGE_MODELS
+
 logger = logging.getLogger(__name__)
 
 # Dataiku CompletionSettings key -> Cerebras payload key, for settings that map 1:1.
@@ -123,12 +125,11 @@ def normalize_tool_calls(tool_calls):
     return normalized
 
 
-def _build_content_parts(message, supports_images):
+def _build_content_parts(parts, role, supports_images):
     """Turn a Dataiku multimodal `parts` list into an OpenAI `content` array."""
-    role = message.get("role")
     content_parts = []
 
-    for part in message.get("parts", []):
+    for part in parts:
         part_type = part.get("type")
 
         if part_type == "TEXT":
@@ -140,16 +141,20 @@ def _build_content_parts(message, supports_images):
             continue
 
         if not supports_images:
+            if role == "tool":
+                raise UnsupportedPromptError(
+                    "This connection does not support images in tool results. Return text from "
+                    "the tool or use a Dedicated endpoint that accepts tool images."
+                )
             raise UnsupportedPromptError(
                 "The prompt contains an image but this connection is not configured for a "
                 "vision-capable model. Set Model to one that accepts image inputs (e.g. "
                 "qwen-3.8-27b), or tick 'Force image input support' on the connection if "
                 "it is a vision model the plugin does not recognise yet."
             )
-        if role != "user":
-            # Image parts are only accepted on user messages.
+        if role not in ("user", "tool"):
             raise UnsupportedPromptError(
-                "Cerebras only accepts image inputs on user messages, got role '{}'.".format(role)
+                "Cerebras only accepts image inputs on user or supported tool messages, got role '{}'.".format(role)
             )
 
         if part_type == "IMAGE_INLINE":
@@ -182,7 +187,18 @@ def _build_content_parts(message, supports_images):
     return content_parts
 
 
-def build_messages(messages, supports_images=False):
+def _build_tool_content(tool_output, supports_tool_images):
+    output = tool_output.get("output", "")
+    text = output if isinstance(output, str) else json.dumps(output)
+    parts = _build_content_parts(tool_output.get("parts") or [], "tool", supports_tool_images)
+    if text:
+        parts.insert(0, {"type": "text", "text": text})
+    if any(part["type"] == "image_url" for part in parts):
+        return parts
+    return "\n".join(part["text"] for part in parts if part["text"])
+
+
+def build_messages(messages, supports_images=False, supports_tool_images=False):
     """Rewrite a Dataiku `query["messages"]` list into Cerebras `messages`."""
     built = []
 
@@ -200,22 +216,17 @@ def build_messages(messages, supports_images=False):
         elif role == "tool" and message.get("toolOutputs"):
             # DSS batches every tool result into one message; the API wants one per call.
             for tool_output in message["toolOutputs"]:
-                output = tool_output.get("output", "")
-                output_text = output if isinstance(output, str) else json.dumps(output)
-                text_parts = [output_text] if output_text else []
-                for part in tool_output.get("parts") or []:
-                    if part.get("type") == "TEXT" and part.get("text"):
-                        text_parts.append(part["text"])
                 built.append({
                     "role": "tool",
                     "tool_call_id": tool_output.get("callId") or tool_output.get("id"),
-                    "content": "\n".join(text_parts),
+                    "content": _build_tool_content(tool_output, supports_tool_images),
                 })
 
         elif "parts" in message:
             built.append({
                 "role": role,
-                "content": _build_content_parts(message, supports_images),
+                "content": _build_content_parts(message["parts"], role,
+                                                supports_tool_images if role == "tool" else supports_images),
             })
 
         else:
@@ -344,17 +355,22 @@ def coerce_extra_body(extra_body):
 
 
 def build_payload(model, query, settings, supports_images=False, reasoning_effort=None,
-                  extra_body=None):
+                  extra_body=None, supports_tool_images=False):
     """Build the JSON body for POST /v1/chat/completions.
 
     The `stream` field is deliberately absent: CerebrasClient sets it, so it cannot
     disagree with the HTTP read mode.
     """
     settings = settings or {}
+    extra_fields = coerce_extra_body(extra_body)
+    endpoint_model = extra_fields.get("model", model)
+    tool_images = endpoint_model in TOOL_IMAGE_MODELS or (
+        supports_tool_images and endpoint_model != "qwen-3.8-27b"
+    )
 
     payload = {
         "model": model,
-        "messages": build_messages(query.get("messages"), supports_images),
+        "messages": build_messages(query.get("messages"), supports_images, tool_images),
     }
 
     for dss_key, cerebras_key in SIMPLE_SETTINGS.items():
@@ -382,7 +398,7 @@ def build_payload(model, query, settings, supports_images=False, reasoning_effor
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
 
-    payload.update(coerce_extra_body(extra_body))
+    payload.update(extra_fields)
     return payload
 
 

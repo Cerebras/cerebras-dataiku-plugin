@@ -96,6 +96,15 @@ class TestBuildMessages:
         assert content[0] == {"type": "text", "text": "What is this?"}
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,iVBORw0KGgo")
 
+    @pytest.mark.parametrize("part,error", [
+        ({"type": "IMAGE_URI", "imageUrl": "https://example.org/plot.png"}, "remote image URLs"),
+        ({"type": "IMAGE_INLINE", "inlineImage": "R0lGODlhAAA"}, "image/gif"),
+    ])
+    def test_tool_result_images_follow_image_input_restrictions(self, part, error):
+        message = {"role": "tool", "toolOutputs": [{"callId": "call_1", "parts": [part]}]}
+        with pytest.raises(UnsupportedPromptError, match=error):
+            build_messages([message], supports_tool_images=True)
+
     def test_a_jpeg_data_uri_is_passed_through_unchanged(self):
         source = "data:image/jpeg;base64,/9j/4AAQ"
         messages = build_messages(

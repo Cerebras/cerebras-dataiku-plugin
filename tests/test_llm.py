@@ -380,6 +380,50 @@ def test_provider_failure_closes_span(monkeypatch, streaming):
 
 
 class TestToolRoundTrip:
+    SCREENSHOT = {"type": "IMAGE_INLINE", "imageMimeType": "image/png", "inlineImage": "iVBORw0KGgoAAAA"}
+
+    @pytest.mark.parametrize("config", [
+        {"model": "qwen-3.8-27b"},
+        {"model": "qwen-3.8-27b", "supports_tool_images": True},
+        {"model": "custom-vision-endpoint", "supports_images": True},
+    ])
+    def test_unsupported_tool_image_fails_before_calling_cerebras(self, monkeypatch, config):
+        llm, sent = _llm(monkeypatch, **config)
+        result = {"callId": "call_1", "output": "", "parts": [self.SCREENSHOT]}
+        with pytest.raises(ValueError, match="images in tool results"):
+            llm.process({"messages": [{"role": "tool", "toolOutputs": [result]}]}, {}, FakeTrace())
+        assert "payload" not in sent
+
+    @pytest.mark.parametrize("config", [
+        {"model": "gemma-4-31b"},
+        {"model": "org-gemma-endpoint", "supports_tool_images": True},
+    ])
+    def test_dedicated_endpoint_preserves_tool_images(self, monkeypatch, config):
+        llm, sent = _llm(monkeypatch, base_url="https://dedicated.example/v1", **config)
+        image_url = "data:image/jpeg;base64,/9j/4AAQ"
+        calls = [{"id": call_id, "type": "function", "function": {"name": "capture", "arguments": "{}"}}
+                 for call_id in ("call_1", "call_2")]
+        results = [
+            {"callId": "call_1", "output": "", "parts": [self.SCREENSHOT]},
+            {"callId": "call_2", "output": "Second capture", "parts": [
+                {"type": "IMAGE_URI", "imageUrl": image_url}, {"type": "TEXT", "text": "After refresh"},
+            ]},
+        ]
+        llm.process({"messages": [
+            {"role": "assistant", "toolCalls": calls}, {"role": "tool", "toolOutputs": results},
+        ]}, {}, FakeTrace())
+        assert sent["payload"]["messages"] == [
+            {"role": "assistant", "content": None, "tool_calls": calls},
+            {"role": "tool", "tool_call_id": "call_1", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAA"}},
+            ]},
+            {"role": "tool", "tool_call_id": "call_2", "content": [
+                {"type": "text", "text": "Second capture"},
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "After refresh"},
+            ]},
+        ]
+
     def test_dss_tool_history_is_translated_for_the_api(self, monkeypatch):
         """The shape DSS sends back after running a tool must survive translation."""
         llm, sent = _llm(monkeypatch, response={"choices": [{"message": {"content": "21C"}}]})

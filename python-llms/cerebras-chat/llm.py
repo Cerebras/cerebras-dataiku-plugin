@@ -86,6 +86,7 @@ class CerebrasLLM(BaseLLM):
             query=query,
             settings=settings,
             supports_images=self.supports_images,
+            supports_tool_images=self.config.get("supports_tool_images", False),
             reasoning_effort=self.reasoning_effort,
             extra_body=self.extra_body,
         )

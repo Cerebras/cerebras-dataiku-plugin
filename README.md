@@ -87,6 +87,7 @@ API key — one per model, or per team.
 | **Base URL** | `https://api.cerebras.ai/v1` | The Cerebras API endpoint |
 | **Model** | `gpt-oss-120b` | The model ID to serve. See [Choosing a model](#choosing-a-model) |
 | **Force image input support** | Off | Enables image prompts for a vision-capable model the plugin does not recognize yet. Well-known vision models are detected automatically. Does not relax the PNG/JPEG or inline-only rules |
+| **Enable images in tool results for custom endpoint IDs** | Off | Enable for a Dedicated endpoint with an organization-specific model ID that accepts images in tool messages. The plugin recognizes the documented Gemma and Kimi tool-image model IDs automatically |
 | **Reasoning effort** | Model default | `none`, `low`, `medium` or `high`. Controls how much the model reasons before answering, on models that support it |
 | **Include reasoning in the answer** | Off | When enabled, also prefixes the answer text with the model's reasoning inside `<thinking>` tags |
 | **Request timeout (s)** | 300 | Maximum time for a single request |
@@ -173,12 +174,13 @@ A few details that are useful to know when designing prompts and pipelines:
 - **Tool calling and structured outputs are separate modes.** If a request specifies both a
   tool set and a JSON response format, tool calling takes precedence. To get structured data
   from a tool call, define the shape in the tool's own `parameters` schema.
-- **Images must be inlined, and must be PNG or JPEG.** Cerebras accepts images only as
-  base64 data URIs on user messages, and only in those two formats. The plugin will not
+- **Images must be inlined, and must be PNG or JPEG.** Qwen 3.8 27B accepts images in
+  user messages only. Enabled Dedicated endpoints for `gemma-4-31b`, `kimi-k2.7-code`,
+  `kimi-k3`, and `kimi-k3.1-pro` also accept images in tool results. The plugin will not
   download an image that a prompt references by URL: fetching a prompt-supplied address
   would have the Dataiku backend make requests on the prompt author's behalf, including to
   hosts only the backend can reach. A remote URL, an unsupported format such as GIF or
-  WebP, or an image on a non-user message is rejected before the request goes out, with a
+  WebP, or an image in a role the endpoint does not support is rejected before the request goes out, with a
   message saying what to change. See the
   [Cerebras image input documentation](https://inference-docs.cerebras.ai/capabilities/image-inputs).
 - **Token usage** is reported for every non-streaming request. For streaming requests, usage
