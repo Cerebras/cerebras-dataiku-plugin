@@ -10,6 +10,9 @@ Cerebras specifics called out inline.
 import json
 import logging
 from urllib.parse import urlsplit
+from uuid import uuid4
+
+from .models import TOOL_IMAGE_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -122,33 +125,36 @@ def normalize_tool_calls(tool_calls):
     return normalized
 
 
-def _build_content_parts(message, supports_images):
+def _build_content_parts(parts, role, supports_images):
     """Turn a Dataiku multimodal `parts` list into an OpenAI `content` array."""
-    role = message.get("role")
     content_parts = []
 
-    for part in message.get("parts", []):
+    for part in parts:
         part_type = part.get("type")
 
         if part_type == "TEXT":
             content_parts.append({"type": "text", "text": part.get("text", "")})
             continue
 
-        if part_type not in ("IMAGE_INLINE", "IMAGE_URL", "IMAGE_URI"):
+        if part_type not in ("IMAGE_INLINE", "IMAGE_URI"):
             logger.warning("Ignoring unsupported prompt part of type %s", part_type)
             continue
 
         if not supports_images:
+            if role == "tool":
+                raise UnsupportedPromptError(
+                    "This connection does not support images in tool results. Return text from "
+                    "the tool or use a Dedicated endpoint that accepts tool images."
+                )
             raise UnsupportedPromptError(
                 "The prompt contains an image but this connection is not configured for a "
                 "vision-capable model. Set Model to one that accepts image inputs (e.g. "
                 "qwen-3.8-27b), or tick 'Force image input support' on the connection if "
                 "it is a vision model the plugin does not recognise yet."
             )
-        if role != "user":
-            # Image parts are only accepted on user messages.
+        if role not in ("user", "tool"):
             raise UnsupportedPromptError(
-                "Cerebras only accepts image inputs on user messages, got role '{}'.".format(role)
+                "Cerebras only accepts image inputs on user or supported tool messages, got role '{}'.".format(role)
             )
 
         if part_type == "IMAGE_INLINE":
@@ -158,7 +164,7 @@ def _build_content_parts(message, supports_images):
                 raise _unsupported_format_error(mime_type)
             url = "data:{};base64,{}".format(mime_type, inline_image)
         else:
-            source_url = part.get("url") or part.get("uri") or ""
+            source_url = part.get("imageUrl") or ""
             if not source_url.startswith(_DATA_URI_SCHEME):
                 # The API does not fetch remote images, and neither does this plugin:
                 # downloading a URL chosen by whoever wrote the prompt would make the
@@ -181,7 +187,18 @@ def _build_content_parts(message, supports_images):
     return content_parts
 
 
-def build_messages(messages, supports_images=False):
+def _build_tool_content(tool_output, supports_tool_images):
+    output = tool_output.get("output", "")
+    text = output if isinstance(output, str) else json.dumps(output)
+    parts = _build_content_parts(tool_output.get("parts") or [], "tool", supports_tool_images)
+    if text:
+        parts.insert(0, {"type": "text", "text": text})
+    if any(part["type"] == "image_url" for part in parts):
+        return parts
+    return "\n".join(part["text"] for part in parts if part["text"])
+
+
+def build_messages(messages, supports_images=False, supports_tool_images=False):
     """Rewrite a Dataiku `query["messages"]` list into Cerebras `messages`."""
     built = []
 
@@ -199,17 +216,17 @@ def build_messages(messages, supports_images=False):
         elif role == "tool" and message.get("toolOutputs"):
             # DSS batches every tool result into one message; the API wants one per call.
             for tool_output in message["toolOutputs"]:
-                output = tool_output.get("output", "")
                 built.append({
                     "role": "tool",
                     "tool_call_id": tool_output.get("callId") or tool_output.get("id"),
-                    "content": output if isinstance(output, str) else json.dumps(output),
+                    "content": _build_tool_content(tool_output, supports_tool_images),
                 })
 
         elif "parts" in message:
             built.append({
                 "role": role,
-                "content": _build_content_parts(message, supports_images),
+                "content": _build_content_parts(message["parts"], role,
+                                                supports_tool_images if role == "tool" else supports_images),
             })
 
         else:
@@ -230,7 +247,7 @@ def _build_tool_choice(tool_choice):
     choice_type = (tool_choice.get("type") or "").lower()
     if choice_type in ("auto", "none", "required"):
         return choice_type
-    if choice_type in ("function", "tool"):
+    if choice_type in ("tool_name", "function", "tool"):
         name = tool_choice.get("name") or (tool_choice.get("function") or {}).get("name")
         if name:
             return {"type": "function", "function": {"name": name}}
@@ -338,17 +355,22 @@ def coerce_extra_body(extra_body):
 
 
 def build_payload(model, query, settings, supports_images=False, reasoning_effort=None,
-                  extra_body=None):
+                  extra_body=None, supports_tool_images=False):
     """Build the JSON body for POST /v1/chat/completions.
 
     The `stream` field is deliberately absent: CerebrasClient sets it, so it cannot
     disagree with the HTTP read mode.
     """
     settings = settings or {}
+    extra_fields = coerce_extra_body(extra_body)
+    endpoint_model = extra_fields.get("model", model)
+    tool_images = endpoint_model in TOOL_IMAGE_MODELS or (
+        supports_tool_images and endpoint_model != "qwen-3.8-27b"
+    )
 
     payload = {
         "model": model,
-        "messages": build_messages(query.get("messages"), supports_images),
+        "messages": build_messages(query.get("messages"), supports_images, tool_images),
     }
 
     for dss_key, cerebras_key in SIMPLE_SETTINGS.items():
@@ -376,7 +398,7 @@ def build_payload(model, query, settings, supports_images=False, reasoning_effor
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
 
-    payload.update(coerce_extra_body(extra_body))
+    payload.update(extra_fields)
     return payload
 
 
@@ -391,15 +413,41 @@ def _usage_to_dataiku(usage):
     return {"promptTokens": prompt_tokens, "completionTokens": completion_tokens}
 
 
+def _log_probs_to_dataiku(logprobs):
+    """Map the output token scores and alternatives on a Cerebras choice."""
+    tokens = (logprobs or {}).get("content")
+    if tokens is None:
+        return {}
+    return {"logProbs": [
+        {
+            "token": token["token"],
+            "logProb": token["logprob"],
+            "topLogProbs": [
+                {"token": candidate["token"], "logProb": candidate["logprob"]}
+                for candidate in (token.get("top_logprobs") or [])
+            ],
+        }
+        for token in tokens
+    ]}
+
+
 def _wrap_reasoning(reasoning):
     return "<thinking>\n{}\n</thinking>\n\n".format(reasoning.strip())
+
+
+def _reasoning_artifact(artifact_id, text):
+    return {
+        "id": artifact_id or uuid4().hex,
+        "type": "REASONING",
+        "parts": [{"type": "TEXT", "index": 0, "text": text}],
+    }
 
 
 def parse_completion(response_data, include_reasoning_in_text=False):
     """Turn a Cerebras chat completion into a Dataiku CompletionResponse.
 
-    Returns the text, token counts, tool calls and finish reason, plus a
-    non-contractual `_reasoning` key the caller can push onto the trace.
+    Returns text, token counts, tool calls, finish reason and any reasoning artifact.
+    The caller also uses the private `_reasoning` field to populate the trace.
     """
     result = {
         "text": "",
@@ -416,10 +464,13 @@ def parse_completion(response_data, include_reasoning_in_text=False):
 
         reasoning = message.get("reasoning") or ""
         text = message.get("content") or ""
-        if reasoning and include_reasoning_in_text:
-            text = _wrap_reasoning(reasoning) + text
+        if reasoning:
+            result["artifacts"] = [_reasoning_artifact(response_data.get("id"), reasoning)]
+            if include_reasoning_in_text:
+                text = _wrap_reasoning(reasoning) + text
         result["text"] = text
         result["_reasoning"] = reasoning
+        result.update(_log_probs_to_dataiku(choice.get("logprobs")))
 
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
@@ -470,7 +521,7 @@ def _merge_tool_call_deltas(accumulator, deltas):
 def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
     """Convert an SSE line iterator into the chunk dicts DSS expects.
 
-    Yields `{"text": ...}` as content arrives, then one `{"toolCalls": [...]}` once
+    Yields text and reasoning artifact deltas, then one `{"toolCalls": [...]}` once
     every call is fully assembled, then a final `{"footer": {...}}` carrying the
     token counts and finish reason.
     """
@@ -478,6 +529,7 @@ def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
     usage = None
     finish_reason = None
     reasoning_open = False
+    reasoning_id = None
 
     for raw_line in lines:
         line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
@@ -486,6 +538,7 @@ def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
             continue
         if chunk.get("_done"):
             break
+        reasoning_id = reasoning_id or chunk.get("id")
 
         # Usage arrives on the terminal chunk, which may carry no choices.
         if chunk.get("usage"):
@@ -500,18 +553,24 @@ def stream_to_dataiku_chunks(lines, include_reasoning_in_text=False):
             delta = choice.get("delta") or {}
 
             reasoning = delta.get("reasoning")
-            if reasoning and include_reasoning_in_text:
-                if not reasoning_open:
-                    yield {"text": "<thinking>\n"}
-                    reasoning_open = True
-                yield {"text": reasoning}
+            if reasoning:
+                artifact = _reasoning_artifact(reasoning_id, reasoning)
+                reasoning_id = artifact["id"]
+                yield {"type": "content", "artifacts": [artifact]}
+                if include_reasoning_in_text:
+                    if not reasoning_open:
+                        yield {"text": "<thinking>\n"}
+                        reasoning_open = True
+                    yield {"text": reasoning}
 
             content = delta.get("content")
-            if content:
-                if reasoning_open:
-                    yield {"text": "\n</thinking>\n\n"}
-                    reasoning_open = False
-                yield {"text": content}
+            if content and reasoning_open:
+                yield {"text": "\n</thinking>\n\n"}
+                reasoning_open = False
+            content_chunk = _log_probs_to_dataiku(choice.get("logprobs"))
+            if content or content_chunk:
+                content_chunk["text"] = content or ""
+                yield content_chunk
 
             if delta.get("tool_calls"):
                 _merge_tool_call_deltas(tool_calls, delta["tool_calls"])

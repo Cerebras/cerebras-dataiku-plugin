@@ -60,6 +60,13 @@
     },
 
     {
+      "name": "supports_tool_images",
+      "label": "Enable images in tool results for custom endpoint IDs",
+      "type": "BOOLEAN",
+      "defaultValue": false,
+      "description": "Enable this for an organization-specific Dedicated endpoint ID that accepts images in tool messages. Documented tool-image models are detected automatically. Qwen 3.8 27B accepts images only in user messages."
+    },
+    {
       "name": "reasoning_effort",
       "label": "Reasoning effort",
       "type": "SELECT",
@@ -78,7 +85,7 @@
       "label": "Include reasoning in the answer",
       "type": "BOOLEAN",
       "defaultValue": false,
-      "description": "Off (recommended): reasoning tokens are recorded on the trace only. On: they are prefixed to the completion inside <thinking> tags."
+      "description": "When the model provides reasoning, DSS receives it as a separate artifact. Enable this option to also include it at the start of the answer text inside <thinking> tags."
     },
     {
       "name": "request_timeout",

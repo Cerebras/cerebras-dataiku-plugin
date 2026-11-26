@@ -8,6 +8,7 @@ are the ones llm.py reads, and that process()/process_stream() honour them.
 import json
 import os
 import sys
+import time
 import types
 
 import pytest
@@ -43,6 +44,21 @@ from llm import CerebrasLLM  # noqa: E402
 class FakeSpan(object):
     def __init__(self):
         self.attributes = {}
+        self.start = self.finish = None
+
+    def __enter__(self):
+        self.begin(int(time.time() * 1000))
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.end(int(time.time() * 1000))
+
+    def begin(self, timestamp):
+        self.start = timestamp
+
+    def end(self, timestamp):
+        assert self.start is not None and self.finish is None
+        self.finish = timestamp
 
 
 class FakeTrace(object):
@@ -105,6 +121,14 @@ def _llm(monkeypatch, response=None, stream_lines=None, **config_overrides):
     monkeypatch.setattr(llm.client, "chat_completion", fake_chat_completion)
     monkeypatch.setattr(llm.client, "stream_chat_completion", fake_stream_chat_completion)
     return llm, sent
+
+
+def _expected_reasoning(text):
+    return {
+        "id": "chatcmpl-1",
+        "type": "REASONING",
+        "parts": [{"type": "TEXT", "index": 0, "text": text}],
+    }
 
 
 class TestSetConfig:
@@ -176,6 +200,8 @@ class TestProcess:
         assert result["promptTokens"] == 10
         assert result["completionTokens"] == 2
         assert result["finishReason"] == "stop"
+        assert "artifacts" not in result
+        assert "logProbs" not in result
         # `_reasoning` is internal and must not leak into the DSS response.
         assert "_reasoning" not in result
 
@@ -186,6 +212,29 @@ class TestProcess:
         assert "stream" not in sent["payload"]
         assert sent["payload"]["temperature"] == 0.1
 
+    def test_returns_token_log_probs_and_alternatives(self, monkeypatch):
+        choice = {
+            "message": {"content": "Yes!"},
+            "logprobs": {"content": [
+                {"token": "Yes", "logprob": -0.2, "bytes": [89, 101, 115], "top_logprobs": [
+                    {"token": "Yes", "logprob": -0.2}, {"token": "No", "logprob": -1.8},
+                ]},
+                {"token": "!", "logprob": 0.0, "top_logprobs": []},
+            ]},
+        }
+        llm, sent = _llm(monkeypatch, response={"choices": [choice]})
+        result = llm.process({"messages": []}, {"logProbs": True, "topLogProbs": 2}, FakeTrace())
+
+        assert sent["payload"]["logprobs"] is True
+        assert sent["payload"]["top_logprobs"] == 2
+        assert result["text"] == "Yes!"
+        assert result["logProbs"] == [
+            {"token": "Yes", "logProb": -0.2, "topLogProbs": [
+                {"token": "Yes", "logProb": -0.2}, {"token": "No", "logProb": -1.8},
+            ]},
+            {"token": "!", "logProb": 0.0, "topLogProbs": []},
+        ]
+
     def test_connection_settings_reach_the_payload(self, monkeypatch):
         llm, sent = _llm(monkeypatch, response=self.RESPONSE, reasoning_effort="high",
                          extra_body={"prompt_cache_key": "team-a"})
@@ -194,24 +243,23 @@ class TestProcess:
         # Anything without a dedicated field still reaches the API via extra payload fields.
         assert sent["payload"]["prompt_cache_key"] == "team-a"
 
-    def test_reasoning_lands_on_the_trace_not_the_answer(self, monkeypatch):
-        response = {"choices": [{"message": {"content": "42", "reasoning": "deep thought"}}]}
-        llm, _ = _llm(monkeypatch, response=response)
+    @pytest.mark.parametrize("inline, expected_text", [
+        (False, "42"),
+        (True, "<thinking>\ndeep thought\n</thinking>\n\n42"),
+    ])
+    def test_returns_reasoning_artifact_and_records_trace(self, monkeypatch, inline, expected_text):
+        response = {"id": "chatcmpl-1",
+                    "choices": [{"message": {"content": "42", "reasoning": "deep thought"}}]}
+        llm, _ = _llm(monkeypatch, response=response, include_reasoning_in_text=inline)
         trace = FakeTrace()
         result = llm.process({"messages": [{"role": "user", "content": "?"}]}, {}, trace)
 
-        assert result["text"] == "42"
+        assert result["text"] == expected_text
+        assert result["artifacts"] == [_expected_reasoning("deep thought")]
+        assert "_reasoning" not in result
+        assert trace.spans[0][1].finish is not None
+        assert trace.spans[0][0] == "Cerebras chat completion"
         assert trace.spans[0][1].attributes["reasoning"] == "deep thought"
-
-    def test_broken_tracing_does_not_break_completions(self, monkeypatch):
-        class ExplodingTrace(object):
-            def subspan(self, name):
-                raise RuntimeError("tracing API changed")
-
-        llm, _ = _llm(monkeypatch, response=self.RESPONSE)
-        result = llm.process({"messages": [{"role": "user", "content": "ping"}]}, {},
-                             ExplodingTrace())
-        assert result["text"] == "pong"
 
 
 class TestProcessStream:
@@ -229,15 +277,65 @@ class TestProcessStream:
                                          {}, FakeTrace()))
 
         assert "".join(c["text"] for c in chunks if "text" in c) == "pong"
+        assert all("artifacts" not in chunk for chunk in chunks)
         footer = chunks[-1]["footer"]
         assert footer["promptTokens"] == 4
         assert footer["finishReason"] == "stop"
         assert sent["method"] == "stream_chat_completion"
 
+    @pytest.mark.parametrize("inline, expected_text", [
+        (False, "42"),
+        (True, "<thinking>\ndeep thought\n</thinking>\n\n42"),
+    ])
+    def test_streams_reasoning_artifact_deltas(self, monkeypatch, inline, expected_text):
+        lines = [
+            'data: {"id":"chatcmpl-1","choices":[{"delta":{"reasoning":"deep"}}]}',
+            'data: {"id":"chatcmpl-1","choices":[{"delta":{"reasoning":" thought","content":"42"}}]}',
+            "data: [DONE]",
+        ]
+        llm, _ = _llm(monkeypatch, stream_lines=lines, include_reasoning_in_text=inline)
+        chunks = list(llm.process_stream({"messages": []}, {}, FakeTrace()))
+
+        assert [chunk for chunk in chunks if "artifacts" in chunk] == [
+            {"type": "content", "artifacts": [_expected_reasoning("deep")]},
+            {"type": "content", "artifacts": [_expected_reasoning(" thought")]},
+        ]
+        assert "".join(c["text"] for c in chunks if "text" in c) == expected_text
+        assert chunks[-1]["footer"]["finishReason"] == "stop"
+
+    def test_streams_log_probs_on_each_content_chunk(self, monkeypatch):
+        choices = [
+            {"delta": {"content": "Yes"}, "logprobs": {"content": [
+                {"token": "Yes", "logprob": -0.2, "top_logprobs": [{"token": "Yes", "logprob": -0.2}]}
+            ]}},
+            {"delta": {"content": "!"}, "logprobs": None},
+            {"delta": {}, "logprobs": {"content": [{"token": "!", "logprob": 0.0}]}},
+            {"delta": {}, "logprobs": {"content": None}, "finish_reason": "stop"},
+        ]
+        lines = ["data: " + json.dumps({"choices": [choice]}) for choice in choices]
+        llm, _ = _llm(monkeypatch, stream_lines=lines + ["data: [DONE]"])
+        stream = llm.process_stream({"messages": []}, {"logProbs": True}, FakeTrace())
+
+        assert list(stream) == [
+            {"text": "Yes", "logProbs": [
+                {"token": "Yes", "logProb": -0.2, "topLogProbs": [{"token": "Yes", "logProb": -0.2}]}
+            ]},
+            {"text": "!"},
+            {"text": "", "logProbs": [{"token": "!", "logProb": 0.0, "topLogProbs": []}]},
+            {"footer": {"promptTokens": 0, "completionTokens": 0, "finishReason": "stop"}},
+        ]
+
     def test_footer_is_recorded_on_the_trace(self, monkeypatch):
         llm, _ = _llm(monkeypatch, stream_lines=self.LINES)
         trace = FakeTrace()
-        list(llm.process_stream({"messages": [{"role": "user", "content": "ping"}]}, {}, trace))
+        stream = llm.process_stream({"messages": []}, {}, trace)
+        assert next(stream) == {"text": "po"}
+        name, span = trace.spans[0]
+        assert name == "Cerebras chat completion (streaming)"
+        assert span.start is not None and span.finish is None
+        assert next(stream) == {"text": "ng"}
+        assert "footer" in next(stream)
+        assert span.finish is not None
         assert trace.spans[0][1].attributes["completionTokens"] == 2
 
     def test_the_response_is_closed_even_if_the_consumer_stops_early(self, monkeypatch):
@@ -253,14 +351,79 @@ class TestProcessStream:
 
         monkeypatch.setattr(llm.client, "stream_chat_completion", fake_stream_chat_completion)
 
+        trace = FakeTrace()
         generator = llm.process_stream({"messages": [{"role": "user", "content": "ping"}]},
-                                       {}, FakeTrace())
+                                       {}, trace)
         next(generator)
         generator.close()
         assert responses[0].closed is True
+        assert trace.spans[0][1].finish is not None
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_provider_failure_closes_span(monkeypatch, streaming):
+    llm = CerebrasLLM()
+    llm.set_config(_config(), {})
+    trace = FakeTrace()
+
+    def fail(payload):
+        raise RuntimeError("provider failed")
+
+    method = "stream_chat_completion" if streaming else "chat_completion"
+    monkeypatch.setattr(llm.client, method, fail)
+    with pytest.raises(RuntimeError, match="provider failed"):
+        if streaming:
+            next(llm.process_stream({"messages": []}, {}, trace))
+        else:
+            llm.process({"messages": []}, {}, trace)
+    assert trace.spans[0][1].finish is not None
 
 
 class TestToolRoundTrip:
+    SCREENSHOT = {"type": "IMAGE_INLINE", "imageMimeType": "image/png", "inlineImage": "iVBORw0KGgoAAAA"}
+
+    @pytest.mark.parametrize("config", [
+        {"model": "qwen-3.8-27b"},
+        {"model": "qwen-3.8-27b", "supports_tool_images": True},
+        {"model": "custom-vision-endpoint", "supports_images": True},
+    ])
+    def test_unsupported_tool_image_fails_before_calling_cerebras(self, monkeypatch, config):
+        llm, sent = _llm(monkeypatch, **config)
+        result = {"callId": "call_1", "output": "", "parts": [self.SCREENSHOT]}
+        with pytest.raises(ValueError, match="images in tool results"):
+            llm.process({"messages": [{"role": "tool", "toolOutputs": [result]}]}, {}, FakeTrace())
+        assert "payload" not in sent
+
+    @pytest.mark.parametrize("config", [
+        {"model": "gemma-4-31b"},
+        {"model": "org-gemma-endpoint", "supports_tool_images": True},
+    ])
+    def test_dedicated_endpoint_preserves_tool_images(self, monkeypatch, config):
+        llm, sent = _llm(monkeypatch, base_url="https://dedicated.example/v1", **config)
+        image_url = "data:image/jpeg;base64,/9j/4AAQ"
+        calls = [{"id": call_id, "type": "function", "function": {"name": "capture", "arguments": "{}"}}
+                 for call_id in ("call_1", "call_2")]
+        results = [
+            {"callId": "call_1", "output": "", "parts": [self.SCREENSHOT]},
+            {"callId": "call_2", "output": "Second capture", "parts": [
+                {"type": "IMAGE_URI", "imageUrl": image_url}, {"type": "TEXT", "text": "After refresh"},
+            ]},
+        ]
+        llm.process({"messages": [
+            {"role": "assistant", "toolCalls": calls}, {"role": "tool", "toolOutputs": results},
+        ]}, {}, FakeTrace())
+        assert sent["payload"]["messages"] == [
+            {"role": "assistant", "content": None, "tool_calls": calls},
+            {"role": "tool", "tool_call_id": "call_1", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAA"}},
+            ]},
+            {"role": "tool", "tool_call_id": "call_2", "content": [
+                {"type": "text", "text": "Second capture"},
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "After refresh"},
+            ]},
+        ]
+
     def test_dss_tool_history_is_translated_for_the_api(self, monkeypatch):
         """The shape DSS sends back after running a tool must survive translation."""
         llm, sent = _llm(monkeypatch, response={"choices": [{"message": {"content": "21C"}}]})

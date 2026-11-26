@@ -66,6 +66,24 @@ class TestBuildMessages:
         assert messages[0]["content"] == "21C"
         assert messages[1]["content"] == '{"aqi": 30}'
 
+    @pytest.mark.parametrize("output,expected", [
+        ("", "Status: paid.\nBalance: 0."),
+        ("Invoice found.", "Invoice found.\nStatus: paid.\nBalance: 0."),
+    ], ids=["parts-only", "output-and-parts"])
+    def test_multipart_tool_output_preserves_text(self, output, expected):
+        messages = build_messages([{
+            "role": "tool",
+            "toolOutputs": [{
+                "callId": "call_123",
+                "output": output,
+                "parts": [
+                    {"type": "TEXT", "text": "Status: paid."},
+                    {"type": "TEXT", "text": "Balance: 0."},
+                ],
+            }],
+        }])
+        assert messages == [{"role": "tool", "tool_call_id": "call_123", "content": expected}]
+
     def test_inline_image_becomes_a_data_uri(self):
         messages = build_messages(
             [{"role": "user", "parts": [
@@ -78,10 +96,19 @@ class TestBuildMessages:
         assert content[0] == {"type": "text", "text": "What is this?"}
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,iVBORw0KGgo")
 
+    @pytest.mark.parametrize("part,error", [
+        ({"type": "IMAGE_URI", "imageUrl": "https://example.org/plot.png"}, "remote image URLs"),
+        ({"type": "IMAGE_INLINE", "inlineImage": "R0lGODlhAAA"}, "image/gif"),
+    ])
+    def test_tool_result_images_follow_image_input_restrictions(self, part, error):
+        message = {"role": "tool", "toolOutputs": [{"callId": "call_1", "parts": [part]}]}
+        with pytest.raises(UnsupportedPromptError, match=error):
+            build_messages([message], supports_tool_images=True)
+
     def test_a_jpeg_data_uri_is_passed_through_unchanged(self):
         source = "data:image/jpeg;base64,/9j/4AAQ"
         messages = build_messages(
-            [{"role": "user", "parts": [{"type": "IMAGE_URL", "url": source}]}],
+            [{"role": "user", "parts": [{"type": "IMAGE_URI", "imageUrl": source}]}],
             supports_images=True,
         )
         assert messages[0]["content"][0]["image_url"]["url"] == source
@@ -91,7 +118,7 @@ class TestBuildMessages:
         with pytest.raises(UnsupportedPromptError, match="does not accept remote image URLs"):
             build_messages(
                 [{"role": "user", "parts": [
-                    {"type": "IMAGE_URL", "url": "https://x.example/y.png"},
+                    {"type": "IMAGE_URI", "imageUrl": "https://x.example/y.png"},
                 ]}],
                 supports_images=True,
             )
@@ -100,7 +127,7 @@ class TestBuildMessages:
         with pytest.raises(UnsupportedPromptError) as raised:
             build_messages(
                 [{"role": "user", "parts": [
-                    {"type": "IMAGE_URL", "url": "https://x.example/secret.png?sig=shhh"},
+                    {"type": "IMAGE_URI", "imageUrl": "https://x.example/secret.png?sig=shhh"},
                 ]}],
                 supports_images=True,
             )
@@ -117,7 +144,7 @@ class TestBuildMessages:
     def test_every_non_data_scheme_is_rejected(self, url):
         with pytest.raises(UnsupportedPromptError, match="does not accept remote image URLs"):
             build_messages(
-                [{"role": "user", "parts": [{"type": "IMAGE_URI", "uri": url}]}],
+                [{"role": "user", "parts": [{"type": "IMAGE_URI", "imageUrl": url}]}],
                 supports_images=True,
             )
 
@@ -151,7 +178,7 @@ class TestBuildMessages:
     def test_a_data_uri_declaring_an_unsupported_type_is_rejected(self, source):
         with pytest.raises(UnsupportedPromptError, match="PNG and JPEG"):
             build_messages(
-                [{"role": "user", "parts": [{"type": "IMAGE_URL", "url": source}]}],
+                [{"role": "user", "parts": [{"type": "IMAGE_URI", "imageUrl": source}]}],
                 supports_images=True,
             )
 
@@ -198,13 +225,17 @@ class TestBuildPayload:
         payload = build_payload("gpt-oss-120b", self.QUERY, {"temperature": 0})
         assert payload["temperature"] == 0
 
-    def test_tool_choice_variants(self):
-        tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
-        assert build_payload("m", self.QUERY, {"tools": tools, "toolChoice": {"type": "AUTO"}})[
-            "tool_choice"] == "auto"
-        assert build_payload("m", self.QUERY, {
-            "tools": tools, "toolChoice": {"type": "FUNCTION", "name": "f"}
-        })["tool_choice"] == {"type": "function", "function": {"name": "f"}}
+    @pytest.mark.parametrize("choice,expected", [
+        ({"type": "auto"}, "auto"),
+        ({"type": "none"}, "none"),
+        ({"type": "required"}, "required"),
+        ({"type": "tool_name", "name": "multiply"},
+         {"type": "function", "function": {"name": "multiply"}}),
+    ], ids=["auto", "none", "required", "named-tool"])
+    def test_tool_choice_variants(self, choice, expected):
+        tools = [{"type": "function", "function": {"name": "multiply", "parameters": {}}}]
+        payload = build_payload("m", self.QUERY, {"tools": tools, "toolChoice": choice})
+        assert payload["tool_choice"] == expected
 
     def test_json_schema_response_format(self):
         schema = {"type": "object", "properties": {"a": {"type": "string"}},
@@ -331,7 +362,7 @@ class TestParseCompletion:
         assert result["toolCalls"][0]["id"] == "c1"
         assert result["text"] == ""
 
-    def test_reasoning_is_hidden_by_default(self):
+    def test_reasoning_is_excluded_from_answer_text_by_default(self):
         response = {"choices": [{"message": {"content": "42", "reasoning": "thinking hard"}}]}
         assert parse_completion(response)["text"] == "42"
         assert parse_completion(response)["_reasoning"] == "thinking hard"
@@ -409,14 +440,17 @@ class TestStreaming:
             lines, include_reasoning_in_text=True) if "text" in c)
         assert text == "<thinking>\nstep 1\n</thinking>\n\nanswer"
 
-    def test_reasoning_deltas_are_dropped_by_default(self):
+    def test_reasoning_deltas_share_an_artifact_id_when_the_stream_omits_it(self):
         lines = [
             _sse({"choices": [{"delta": {"reasoning": "step 1"}}]}),
+            _sse({"choices": [{"delta": {"reasoning": " and step 2"}}]}),
             _sse({"choices": [{"delta": {"content": "answer"}}]}),
             "data: [DONE]",
         ]
-        text = "".join(c["text"] for c in stream_to_dataiku_chunks(lines) if "text" in c)
-        assert text == "answer"
+        chunks = list(stream_to_dataiku_chunks(lines))
+        first, second = [c["artifacts"][0] for c in chunks if "artifacts" in c]
+        assert first["id"] and second["id"] == first["id"]
+        assert "".join(c["text"] for c in chunks if "text" in c) == "answer"
 
     def test_keepalives_and_garbage_are_ignored(self):
         lines = ["", ": keep-alive", "data: ", "data: not-json",

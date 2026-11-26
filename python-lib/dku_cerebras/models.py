@@ -8,7 +8,8 @@ force it on for anything newer than this list.
 # Kept in step with https://inference-docs.cerebras.ai/capabilities/image-inputs.
 # kimi-k2.7-code is customer-trials-only, so most keys cannot reach it; listing it
 # costs nothing and saves the few who can from ticking the override checkbox.
-VISION_MODELS = frozenset(["qwen-3.8-27b", "gemma-4-31b", "kimi-k2.7-code"])
+TOOL_IMAGE_MODELS = frozenset(["gemma-4-31b", "kimi-k2.7-code", "kimi-k3", "kimi-k3.1-pro"])
+VISION_MODELS = TOOL_IMAGE_MODELS | {"qwen-3.8-27b"}
 
 
 def model_label(model_id):
